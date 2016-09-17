@@ -4,12 +4,8 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.os.AsyncTask;
-import android.os.Handler;
-import android.os.Message;
 import android.support.v7.app.AppCompatActivity;
 import android.os.Bundle;
-import android.util.Log;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
@@ -73,7 +69,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
                         DownloadService.ACTION_DOWNLOAD);
                 String url = "http://downmobile.kugou.com/Android/KugouPlayer/8281/KugouPlayer_219_V8.2.8.apk";
                 ThreadInfo threadInfo = new ThreadInfo(MyConstant.DEFAULT_THREAD_ID,MyConstant.DEFAULT_START,MyConstant.DEFAULT_END,MyConstant.DEFAULT_FINISHED,url);
-                intent.putExtra(DownloadService.TAG_FILE, threadInfo);
+                intent.putExtra(DownloadService.TAG_THREAD_INFO, threadInfo);
                 intent.putExtra(DownloadService.TAG_THREAD_COUNT,threadCount);
                 isDownload = !isDownload;
                 button.setText(isDownload?"暂停":"下载");
@@ -91,7 +87,7 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
     public class DownloadBroadcastReceiver extends BroadcastReceiver {
         private long contentLength;
         private String fileName;
-        private long totolFinish;
+        private long totalFinish;
 
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -102,24 +98,26 @@ public class MainActivity extends AppCompatActivity implements View.OnClickListe
                 case DownloadService.ACTION_INIT:
                     contentLength =  intent.getExtras().getLong("contentLength");
                     fileName = intent.getExtras().getString("fileName");
+                    // progressBar需要一个int类型 contentLength直接转int超出上限
                     progressBar.setMax((int) (contentLength/1024.00));
                     downloadName.setText(fileName);
                     break;
                 case DownloadService.ACTION_UPDATE:
                     String downloadUrl = intent.getExtras().getString("downloadUrl");
 
+                    //每个线程完成的
                     long singleFinished = intent.getExtras().getLong(downloadUrl);
 
-                    totolFinish =totolFinish+singleFinished;
+                    totalFinish = totalFinish +singleFinished;
 
                     //这里的finished 是long类型，初始化进度条的时候 设置max为length/1024
                     //long数字太大，超过int范围
-                    progressBar.setProgress((int) (totolFinish/1024.00));
-                    int progress = (int) (totolFinish * 100.00 / contentLength);
+                    progressBar.setProgress((int) (totalFinish /1024));
+                    int progress = (int) (totalFinish * 100.00 / contentLength);
 
                     tv_progress.setText(progress+"%");
 
-                    if (totolFinish == contentLength){ //传输完毕
+                    if (totalFinish == contentLength){ //传输完毕
                         isFinished = true;
                         tv_progress.setText("下载完成");
                         button.setText("安装");

@@ -5,6 +5,9 @@ import android.preference.PreferenceActivity;
 
 import java.io.IOException;
 import java.net.HttpURLConnection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 import okhttp3.Call;
 import okhttp3.Callback;
@@ -26,6 +29,8 @@ public class Client {
         okHttpClient = new OkHttpClient();
     }
 
+    private Map<String,List<Call>> map = new HashMap<>();
+
     public static Client getClient() {
         if (client == null) {
             client = new Client();
@@ -35,11 +40,12 @@ public class Client {
 
     /**
      * get方式请求
-     *
+     * @param list list
      * @param url      url
      * @param callback 回掉接口
      */
-    public void get(String url, Callback callback) {
+    public void get(String url,List<Call> list, Callback callback) {
+        map.put(url,list);
         get(url, -1, -1, callback);
     }
 
@@ -51,13 +57,26 @@ public class Client {
      * @param callback callback
      */
     public void get(String url, long start, long end, Callback callback) {
+
+        List<Call> list = map.get(url);
+
 //        Range: bytes=0-1024 代表请求数据的范围
         Request.Builder builder = new Request.Builder();
         if (start != -1 && end != -1) {
             builder=builder.header("Range", "bytes=" + start + "-" + end);
         }
         Request request = builder.url(url).build();
-        okHttpClient.newCall(request).enqueue(callback);
+        Call call = okHttpClient.newCall(request);
+
+        list.add(call);
+        call.enqueue(callback);
+    }
+
+    public void cancel(String downloadUrl){
+        List<Call> list = map.get(downloadUrl);
+        for (Call call:list) {
+            call.cancel();
+        }
     }
 
     public void post() {

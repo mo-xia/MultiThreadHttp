@@ -28,14 +28,15 @@ public class DownloadTask {
 
     private ThreadHttpDaoImpl httpDao;
     private boolean isPause;
+    private File downloadPath;
 
     private Context context;
     private Client client;
     private String fileName;
     private long contentLength;
-
-    private File downloadPath;
     private int threadCount;
+    private String downloadUrl;
+
     private static final int WHAT_UPDATE_THREAD = 100;
     private static final int WHAT_DELETE_THREAD = 200;
     private Handler handler = new Handler() {
@@ -47,8 +48,8 @@ public class DownloadTask {
                     Bundle bundle = (Bundle) msg.obj;
                     String downloadUrl = bundle.getString("downloadUrl");
                     int thread_id = bundle.getInt("thread_id");
-                    long finished = bundle.getLong("finished");
-                    httpDao.updateThreadInfo(downloadUrl, thread_id, finished);
+                    long finishLen = bundle.getLong("finishLen");
+                    httpDao.updateThreadInfo(downloadUrl, thread_id, finishLen);
                     break;
                 case WHAT_DELETE_THREAD:
                     Bundle bundle1 = (Bundle) msg.obj;
@@ -60,19 +61,35 @@ public class DownloadTask {
         }
     };
 
-    public void setPause(boolean pause) {
-        isPause = pause;
-    }
-
-    public DownloadTask(Context context, Client client, String fileName, long contentLength, int threadCount) {
+    public DownloadTask(Context context, Client client, String fileName, long contentLength, int threadCount, String downloadUrl) {
         this.context = context;
         this.client = client;
         this.fileName = fileName;
         this.contentLength = contentLength;
         this.threadCount = threadCount;
+        this.downloadUrl = downloadUrl;
         // 创建dao
         httpDao = new ThreadHttpDaoImpl(context);
         downloadPath = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+    }
+
+    /**
+     * 执行任务
+     */
+    public void execute() {
+        // 根据检查结果续传或者从头开始
+        if (!httpDao.isExist(downloadUrl)) {
+            // 没有进度，创建进度，开始下载
+            // 获得线程数量
+            int needThreadCount = getNeedThreadCount(true);
+            // 获得线程信息的集合 创建进度
+            List<ThreadInfo> threadInfoList = getDlThreadInfoList(downloadUrl,
+                    contentLength, needThreadCount);
+            startDownload(threadInfoList);
+        } else {
+            // 有进度，读取进度，设置请求的位置
+            startDownload(httpDao.selectThreadInfo(downloadUrl));
+        }
     }
 
     /**
@@ -93,31 +110,16 @@ public class DownloadTask {
     }
 
     /**
-     * 执行任务
+     * 获得每个线程下载信息
      *
-     * @param downloadUrl downloadUrl
+     * @param downloadUrl     downloadUrl
+     * @param contentLength   contentLength
+     * @param needThreadCount needThreadCount
+     * @return 线程信息的集合
      */
-    public void execute(String downloadUrl) {
-
-        // 根据检查结果续传或者从头开始
-        if (!httpDao.isExist(downloadUrl)) {
-            // 没有进度，创建进度，开始下载
-            // 获得线程数量
-            int needThreadCount = getNeedThreadCount(true);
-            // 获得线程信息的集合 创建进度
-            List<ThreadInfo> threadInfoList = getDlThreadInfoList(downloadUrl,
-                    contentLength, needThreadCount);
-
-            startDownload(threadInfoList);
-        } else {
-            // 有进度，读取进度，设置请求的位置
-            startDownload(httpDao.selectThreadInfo(downloadUrl));
-        }
-    }
-
-    private List<ThreadInfo> getDlThreadInfoList(String downloadUrl, long contentLenght, int needThreadCount) {
+    private List<ThreadInfo> getDlThreadInfoList(String downloadUrl, long contentLength, int needThreadCount) {
         List<ThreadInfo> list = new ArrayList<>();
-        int ave = (int) (contentLenght / needThreadCount);
+        int ave = (int) (contentLength / needThreadCount);
         // 假设一共10个字节 0~9
         // 分三个线程
         // 第0个线程 0~2 应该完成 3
@@ -125,16 +127,14 @@ public class DownloadTask {
         // 第2个线程 6~10 应该完成 4
         for (int i = 0; i < needThreadCount; i++) {
             long end;
-            long finished;
             if (i == needThreadCount - 1) {
-                end = contentLenght - 1;
+                end = contentLength - 1;
             } else {
                 end = ave * (i + 1) - 1;
             }
             ThreadInfo threadInfo = new ThreadInfo(
                     i, ave * i, end, 0, downloadUrl
             );
-
             // 创建进度
             httpDao.insertThreadInfo(threadInfo);
             list.add(threadInfo);
@@ -156,11 +156,46 @@ public class DownloadTask {
         context.sendBroadcast(intent);
     }
 
+    /**
+     * handler发送消息
+     *
+     * @param bundle bundle
+     * @param what   what
+     */
     private void sendMessage(Bundle bundle, int what) {
         Message msg = Message.obtain();
         msg.what = what;
         msg.obj = bundle;
         handler.sendMessage(msg);
+    }
+
+    /**
+     * 发送一个完成消息
+     * @param thread_id thread_id
+     */
+    private void sendFinishMessage(int thread_id){
+        Bundle bundle = new Bundle();
+        bundle.putString("downloadUrl", downloadUrl);
+        bundle.putInt("thread_id", thread_id);
+        sendMessage(bundle, WHAT_DELETE_THREAD);
+    }
+
+    /**
+     * 暂停下载
+     *
+     * @param pause pause
+     */
+    public void setPause(boolean pause) {
+        isPause = pause;
+    }
+
+    /**
+     * 任务取消，http请求全部取消 数据库断点数据清空
+     *  @param downloadUrl downloadUrl
+     */
+    public void cancel(String downloadUrl) {
+        client.cancel(downloadUrl);
+        httpDao.deleteThreadInfo(downloadUrl);
     }
 
     /**
@@ -170,16 +205,18 @@ public class DownloadTask {
      */
     private void startDownload(List<ThreadInfo> threadInfoList) {
 
+        //遍历
         for (ThreadInfo info : threadInfoList) {
             final String downloadUrl = info.getDownloadUrl();
             final int thread_id = info.getThread_id();
             final long start = info.getStart();
             final long finished = info.getFinished();
+            final long end = info.getEnd();
 
-            Log.d("****", start + "------" + thread_id + "------" + finished);
+//            Log.d("****", start + "------" + thread_id + "------" + finished);
 
-            long end = info.getEnd();
-            if (start + finished < end + 1) {
+            if (start + finished < end + 1) { // 该线程还没下载完毕
+
                 // 开始任务
                 client.get(downloadUrl, start + finished, end, new Callback() {
                     @Override
@@ -199,39 +236,55 @@ public class DownloadTask {
                         long finishLen = finished;
                         byte[] buffer = new byte[1024];
                         int len = -1;
+
+                        // 跳到上次完成的地方，要加上当前线程开始点
+                        assert randomAccessFile != null;
                         randomAccessFile.seek(start + finished);
+                        // 读写
                         while ((len = inputStream.read(buffer)) != -1) {
                             if (!isPause) {
                                 randomAccessFile.write(buffer, 0, len);
+                                // 当前线程完成的总数
                                 finishLen = finishLen + len;
+                                // 发送该次循环所写的数据的大小
                                 sendDownloadBroadcast(downloadUrl, len);
                             } else {
-//                                httpDao.updateThreadInfo(downloadUrl, thread_id, finishLen);
-//                                sendDownloadBroadcast(downloadUrl, finishLen);
+
+                                // 多线程操作数据库 db.close 会报异常哦
+                                //httpDao.updateThreadInfo(downloadUrl, thread_id, finishLen);
 
                                 inputStream.close();
                                 randomAccessFile.close();
 
+                                // 如果暂停，把当前线程信息发送给handler
+                                // 这么做的原因是 消息是发送到消息队列 是同步更新的
                                 Bundle bundle = new Bundle();
                                 bundle.putString("downloadUrl", downloadUrl);
                                 bundle.putInt("thread_id", thread_id);
-                                bundle.putLong("finished", finishLen);
+                                bundle.putLong("finishLen", finishLen);
                                 sendMessage(bundle, WHAT_UPDATE_THREAD);
 
-                                break;
+                                randomAccessFile.close();
+                                inputStream.close();
+                                return; //直接返回 onResponse方法直接结束
                             }
                         }
-                        if (finishLen == contentLength) {
 
-                            randomAccessFile.close();
-                            inputStream.close();
+                        randomAccessFile.close();
+                        inputStream.close();
 
-                            Bundle bundle = new Bundle();
-                            bundle.putString("downloadUrl", downloadUrl);
-                            bundle.putInt("thread_id", thread_id);
-                            sendMessage(bundle, WHAT_DELETE_THREAD);
-//                            httpDao.deleteThreadInfo(downloadUrl, thread_id);
-                        }
+                        // 如果能到这里，只能是当前线程的while循环结束，就是说所有下载都已经结束;
+                        sendFinishMessage(thread_id);
+
+                        // 下面这种写法看似很合逻辑，其实是浪费资源 ^_^
+                        /*if (finishLen == end - start + 1 && thread_id != threadCount - 1 ) {
+                            //不是最后一个线程 下载完成
+                            sendFinishMessage(thread_id);
+
+                        } else if (finishLen == end - start && thread_id == threadCount - 1) {
+                            // 最后一个线程完成
+                            sendFinishMessage(thread_id);
+                        }*/
                     }
                 });
             }
