@@ -1,6 +1,7 @@
 package study.luofeng.com.multitask;
 
 import android.content.Context;
+import android.os.Bundle;
 import android.os.Environment;
 import android.os.Message;
 import android.util.Log;
@@ -26,21 +27,23 @@ public class MultiDownloadTask implements Runnable {
     /**
      * 任务的5种下载状态
      */
-    private static final int STATE_DOWNLOAD = 0;
-    private static final int STATE_PAUSE = 1;
-    private static final int STATE_CONTINUE = 2;
-    private static final int STATE_FINISH = 3;
-    private static final int STATE_ERROR = 4;
+    public static final int STATE_PREPARE = 0;
+    public static final int STATE_DOWNLOAD = 1;
+    public static final int STATE_PAUSE = 2;
+    public static final int STATE_FINISH = 3;
+    public static final int STATE_ERROR = 4;
 
     private int taskState = -1; // 当前的任务状态
-    private String downloadUrl;
     private int threadCount;
-    private static ThreadHttpDaoImpl httpDao;
+    private boolean isContinue = false; // 是否是续传 默认不是
+
+    private FileInfo fileInfo;
+    private String downloadUrl;
     private String fileName;
     private File downloadPath;
-
     private long downloadLength;
-    private FileInfo fileInfo;
+
+    private static ThreadHttpDaoImpl httpDao; // 静态保证只有一个变量
 
     public MultiDownloadTask(Context context, String downloadUrl, int threadCount) {
         this.downloadUrl = downloadUrl;
@@ -48,6 +51,7 @@ public class MultiDownloadTask implements Runnable {
         fileInfo = new FileInfo();
         fileInfo.setDownloadUrl(downloadUrl);
         if (httpDao == null) {
+            // 保证只有这一个实例，保证数据库的同步操作
             httpDao = new ThreadHttpDaoImpl(context);
         }
     }
@@ -74,16 +78,13 @@ public class MultiDownloadTask implements Runnable {
 
     public void executeDownload() {
         List<ThreadInfo> threadInfoList = null;
-        switch (taskState){
-            case STATE_DOWNLOAD:
-                // 1.得到需要的线程数
-                int needThreadCount = getNeedThreadCount(fileInfo.getFileSize());
-                // 2.根据文件长度和线程数，分配每个线程的任务
-                threadInfoList = getThreadInfoList(fileInfo.getFileSize(), needThreadCount);
-                break;
-            case STATE_CONTINUE:
-                threadInfoList = httpDao.selectThreadInfo(downloadUrl);
-                break;
+        if (!isContinue) {
+            // 1.得到需要的线程数
+            int needThreadCount = getNeedThreadCount(fileInfo.getFileSize());
+            // 2.根据文件长度和线程数，分配每个线程的任务
+            threadInfoList = getThreadInfoList(fileInfo.getFileSize(), needThreadCount);
+        } else {
+            threadInfoList = httpDao.selectThreadInfo(downloadUrl);
         }
 
         // 3.根据线程信息下载
@@ -92,6 +93,7 @@ public class MultiDownloadTask implements Runnable {
 
     /**
      * 获得每个线程下载信息
+     *
      * @param contentLength   contentLength
      * @param needThreadCount needThreadCount
      * @return 线程信息的集合
@@ -123,6 +125,7 @@ public class MultiDownloadTask implements Runnable {
 
     /**
      * 文件太小直接使用单线程
+     *
      * @param contentLength contentLength
      * @return 最终确认的线程数
      */
@@ -137,6 +140,7 @@ public class MultiDownloadTask implements Runnable {
 
     /**
      * 创建一个随机访问文件 设置大小
+     *
      * @param contentLength 文件的大小
      * @param fileName      文件的名字
      */
@@ -162,14 +166,13 @@ public class MultiDownloadTask implements Runnable {
         }
     }
 
-    public void setPause(){
+    public void setPause() {
         taskState = STATE_PAUSE;
     }
 
-    public void setContinue(){
-        taskState = STATE_CONTINUE;
+    public void setContinue(boolean aContinue) {
+        isContinue = aContinue;
     }
-
 
     private void startDownload(List<ThreadInfo> threadInfoList) {
 
@@ -188,6 +191,13 @@ public class MultiDownloadTask implements Runnable {
                     @Override
                     public void onFailure(Call call, IOException e) {
                         taskState = STATE_ERROR;
+                        Message msg = Message.obtain();
+                        msg.what = MultiTaskService.WHAT_STATE_CHANGE;
+                        Bundle bundle = new Bundle();
+                        bundle.putString(MultiTaskService.KEY_URL,downloadUrl);
+                        bundle.putInt(MultiTaskService.KEY_STATE,taskState);
+                        msg.obj = bundle;
+                        MultiTaskService.handler.sendMessage(msg);
                     }
 
                     @Override
@@ -212,7 +222,7 @@ public class MultiDownloadTask implements Runnable {
                                 randomAccessFile.write(buffer, 0, len);
 
                                 // 当前任务的下载了的总字节数
-                                downloadLength = downloadLength+len;
+                                downloadLength = downloadLength + len;
 
                                 // 当前线程完成的总数
                                 finishLen = finishLen + len;
@@ -225,7 +235,7 @@ public class MultiDownloadTask implements Runnable {
                                 MultiTaskService.handler.sendMessage(message);
                             } else {
                                 // 写进度
-                                httpDao.updateThreadInfo(downloadUrl,thread_id,finishLen);
+                                httpDao.updateThreadInfo(downloadUrl, thread_id, finishLen);
                                 randomAccessFile.close();
                                 inputStream.close();
                                 return;
@@ -234,8 +244,8 @@ public class MultiDownloadTask implements Runnable {
 
                         randomAccessFile.close();
                         inputStream.close();
-                        httpDao.deleteThreadInfo(downloadUrl,thread_id);
-                        if (downloadLength == fileInfo.getFileSize()){
+                        httpDao.deleteThreadInfo(downloadUrl, thread_id);
+                        if (downloadLength == fileInfo.getFileSize()) {
                             taskState = STATE_FINISH;
                         }
                     }
